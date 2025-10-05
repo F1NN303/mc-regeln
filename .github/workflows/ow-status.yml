@@ -5,6 +5,10 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: ow2-status
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -13,27 +17,44 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install deps
-        run: pip install requests beautifulsoup4 pillow
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 pillow
 
       - name: Run status script
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           THUMB_URL: https://raw.githubusercontent.com/${{ github.repository }}/main/assets/ow2.png
+          REGIONS: "EU,NA,ASIA"            # bei Bedarf anpassen
+          STRICT_PLATFORM: "false"         # optional: true = niemals rot ohne JSON
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           mkdir -p .bot_state assets
           python scripts/ow_status.py
 
-      - name: Persist state + sparkline
+      - name: Persist state (default branch only)
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .bot_state/ow_message_id.txt .bot_state/history.json assets/sparkline.png || true
+          git add \
+            .bot_state/ow_message_id.txt \
+            .bot_state/history.json \
+            .bot_state/last_payload.json \
+            .bot_state/last_latency.json \
+            .bot_state/state.json \
+            .bot_state/platform_cache.json \
+            assets/sparkline.png 2>/dev/null || true
           git commit -m "update OW status state" || echo "no changes"
           git push || true
