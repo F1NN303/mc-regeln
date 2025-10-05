@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # <-- nötig, um die Message-ID ins Repo zu schreiben
+  contents: write
 
 jobs:
   post:
@@ -20,21 +20,20 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        run: pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4 pillow
 
       - name: Run status script
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          THUMB_URL: https://raw.githubusercontent.com/${{ github.repository }}/main/assets/ow2.png
         run: |
-          mkdir -p .bot_state
+          mkdir -p .bot_state assets
           python scripts/ow_status.py
 
-      - name: Persist Discord message id
+      - name: Persist state + sparkline
         run: |
-          if [ -f .bot_state/ow_message_id.txt ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add .bot_state/ow_message_id.txt
-            git commit -m "store OW status message id" || echo "no changes"
-            git push
-          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .bot_state/ow_message_id.txt .bot_state/history.json assets/sparkline.png || true
+          git commit -m "update OW status state" || echo "no changes"
+          git push || true
