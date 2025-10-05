@@ -179,7 +179,7 @@ def robust_platform_status_overview(pc_state: str):
             bad_kw=["major outage","outage","down"]
         )
     ]
-    ps_state, ps_srcs = _quorum_merge(ps_candidates)
+    ps_state, _ = _quorum_merge(ps_candidates)
     if ps_state == "unknown":
         prev = cache.get("PlayStation", {})
         ps_state = prev.get("state", "unknown")
@@ -198,7 +198,7 @@ def robust_platform_status_overview(pc_state: str):
             bad_kw=["outage","down"]
         )
     ]
-    xb_state, xb_srcs = _quorum_merge(xb_candidates)
+    xb_state, _ = _quorum_merge(xb_candidates)
     if xb_state == "unknown":
         prev = cache.get("Xbox", {})
         xb_state = prev.get("state","unknown")
@@ -217,7 +217,7 @@ def robust_platform_status_overview(pc_state: str):
             bad_kw=["outage","down","experiencing issues"]
         )
     ]
-    nin_state, nin_srcs = _quorum_merge(nin_candidates)
+    nin_state, _ = _quorum_merge(nin_candidates)
     if nin_state == "unknown":
         prev = cache.get("Switch", {})
         nin_state = prev.get("state","unknown")
@@ -337,6 +337,7 @@ if __name__ == "__main__":
     head_line="   ".join(head_bits)+f" | 24h {u24}% • 7T {u7}%"
     description=f"```\n{head_line}\n```"
 
+    # Plattformen (konservativ, mit Cache/Fallback)
     platforms=robust_platform_status_overview(new_state)
     lines=[]
     for name in ("PC","PlayStation","Xbox","Switch"):
@@ -345,6 +346,7 @@ if __name__ == "__main__":
         lines.append(f"{name:<11} {platform_icon(st)} {st.upper():<7}{age_txt}")
     platform_block="```\n"+"\n".join(lines)+"\n```"
 
+    # Embed-Felder
     fields=[]
     fields.append({"name":"Plattformen","value":platform_block,"inline":False})
     for r in REGIONS:
@@ -357,4 +359,47 @@ if __name__ == "__main__":
     else:
         label=f"{ki_count} neue/aktualisierte Beiträge in 24h" if ki_count>0 else "Keine neuen Beiträge in 24h"
         ki_val=f"[{label}]({ki_url})"+(f"\nZuletzt: „{ki_title}“" if ki_title else "")
-   
+    fields.append({"name":"Known Issues","value":ki_val,"inline":False})
+    fields.append({"name":"Letzte Änderungen","value":last_changelog_lines(2),"inline":False})
+
+    embed={
+        "title":"Overwatch 2 – Status",
+        "description":description,
+        "color":COLORS.get(new_state,COLORS["unknown"]),
+        "fields":fields,
+        "footer":{"text":f"Letzte Prüfung: {now_utc_str()}"},
+        "timestamp":datetime.datetime.utcnow().isoformat()
+    }
+    if THUMB_URL:
+        embed["thumbnail"]={"url":THUMB_URL}
+    if REPO and SPARK_PATH.exists():
+        embed["image"]={"url":f"https://raw.githubusercontent.com/{REPO}/main/assets/sparkline.png"}
+
+    components=[{
+        "type":1,
+        "components":[
+            {"type":2,"style":5,"label":"Maintenance","url":MAINT_URL},
+            {"type":2,"style":5,"label":"Known Issues","url":ki_url},
+            {"type":2,"style":5,"label":"Support","url":"https://support.blizzard.com"}
+        ]
+    }]
+
+    payload={"embeds":[embed],"components":components}
+
+    # Diff-only: nur editieren, wenn sich etwas geändert hat
+    last = read_json(LAST_FILE, None)
+    if last == payload:
+        raise SystemExit(0)
+    write_json(LAST_FILE, payload)
+
+    # Nachricht bearbeiten / anlegen
+    mid = MID_FILE.read_text().strip() if MID_FILE.exists() else None
+    if mid:
+        r = edit_existing(mid, payload)
+        if r.status_code == 404:
+            mid = None
+        else:
+            r.raise_for_status()
+    if not mid:
+        new_id = send_new(payload)
+        MID_FILE.write_text(str(new_id))
