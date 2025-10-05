@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
+  # optional, damit es auch bei PR-Änderungen läuft
+  pull_request:
+    paths:
+      - "scripts/**"
+      - ".github/workflows/ow-status.yml"
+      - "requirements.txt"
 
 concurrency:
   group: ow2-status
@@ -16,7 +22,8 @@ jobs:
   post:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
@@ -26,18 +33,22 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: "requirements.txt"
+
+      - name: Debug files (once)
+        run: ls -R
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pillow
+          pip install -r requirements.txt
 
       - name: Run status script
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           THUMB_URL: https://raw.githubusercontent.com/${{ github.repository }}/main/assets/ow2.png
-          REGIONS: "EU,NA,ASIA"            # bei Bedarf anpassen
-          STRICT_PLATFORM: "false"         # optional: true = niemals rot ohne JSON
+          REGIONS: "EU,NA,ASIA"
+          STRICT_PLATFORM: "false"     # auf "true" setzen = sehr konservativ
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           mkdir -p .bot_state assets
