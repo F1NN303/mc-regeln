@@ -2,8 +2,11 @@ name: OW2 Status to Discord (hourly)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # stündlich
+    - cron: "0 * * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write   # <-- nötig, um die Message-ID ins Repo zu schreiben
 
 jobs:
   post:
@@ -22,4 +25,16 @@ jobs:
       - name: Run status script
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python scripts/ow_status.py
+        run: |
+          mkdir -p .bot_state
+          python scripts/ow_status.py
+
+      - name: Persist Discord message id
+        run: |
+          if [ -f .bot_state/ow_message_id.txt ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .bot_state/ow_message_id.txt
+            git commit -m "store OW status message id" || echo "no changes"
+            git push
+          fi
