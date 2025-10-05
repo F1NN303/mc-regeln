@@ -23,7 +23,7 @@ WEBHOOK   = os.environ["DISCORD_WEBHOOK_URL"].strip()
 THUMB_URL = os.environ.get("THUMB_URL", "").strip()
 REGIONS   = [r.strip() for r in os.environ.get("REGIONS", "EU,NA,ASIA").split(",") if r.strip()]
 
-UA = {"User-Agent": "OW2-Status/1.3 (+github-actions)"}
+UA = {"User-Agent": "OW2-Status/1.4 (+github-actions)"}
 
 # =========================
 # Farbdefinitionen & Schwellen
@@ -127,107 +127,112 @@ def fetch_maintenance_hint():
         return "unknown", "Wartungsseite nicht prüfbar."
 
 # =========================
-# Plattform-Status (konservativ + Cache)
+# Plattform-Status (robuste Signals + Quorum + Cache)
 # =========================
-def _read_cache():
-    return read_json(PLATFORM_CACHE, {"PC": {}, "PlayStation": {}, "Xbox": {}, "Switch": {}})
+PLATFORM_SIGNALS = {
+    "PlayStation": {
+        "hosts": ["store.playstation.com", "api.playstation.com", "playstation.com"],
+        "urls":  ["https://store.playstation.com", "https://api.playstation.com", "https://playstation.com"],
+        "status_url": "https://status.playstation.com",
+        "bad_kw": ["major outage","outage","service is down","all services are down"],
+        "warn_kw":["limited","degraded","maintenance"],
+        "ok_kw":  ["all services are up","services are available","up and running","no issues"]
+    },
+    "Xbox": {
+        "hosts": ["xsts.auth.xboxlive.com", "title.mgt.xboxlive.com", "support.xbox.com"],
+        "urls":  ["https://xsts.auth.xboxlive.com", "https://title.mgt.xboxlive.com", "https://support.xbox.com/en-US/xbox-live-status"],
+        "status_url": "https://support.xbox.com/en-US/xbox-live-status",
+        "bad_kw": ["major outage","outage","down"],
+        "warn_kw":["limited","degraded","maintenance"],
+        "ok_kw":  ["all services up","services are available","no problems","up and running"]
+    },
+    "Switch": {
+        "hosts": ["accounts.nintendo.com", "ec.nintendo.com", "www.nintendo.co.jp"],
+        "urls":  ["https://accounts.nintendo.com", "https://ec.nintendo.com", "https://www.nintendo.co.jp/netinfo/en_US/index.html"],
+        "status_url": "https://www.nintendo.co.jp/netinfo/en_US/index.html",
+        "bad_kw": ["service outage","outage","down","experiencing issues"],
+        "warn_kw":["under maintenance","maintenance","scheduled maintenance"],
+        "ok_kw":  ["operating normally","all servers are operating normally","no issues"]
+    }
+}
 
-def _write_cache(c):
-    write_json(PLATFORM_CACHE, c)
+def _dns_ok(host, timeout=3.0):
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except OSError:
+        return False
 
-def _minutes_ago(ts):
-    if not ts: return None
-    try: return int((time.time() - ts) / 60)
-    except Exception: return None
+def _tcp_ok(host, timeout=3.0):
+    try:
+        with socket.create_connection((host, 443), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+def _http_ok(url, timeout=6):
+    try:
+        r = requests.head(url, timeout=timeout, allow_redirects=True, headers=UA)
+        return r.status_code in (200, 301, 302, 303, 307, 308)
+    except Exception:
+        return False
+
+def _status_page_hint(url, ok_kw, warn_kw, bad_kw):
+    try:
+        r = requests.get(url, timeout=8, headers=UA)
+        t = (r.text or "").lower()
+        if any(k in t for k in bad_kw):  return "warn"
+        if any(k in t for k in warn_kw): return "info"
+        if any(k in t for k in ok_kw):   return "ok"
+        return "unknown"
+    except Exception:
+        return "unknown"
 
 def platform_icon(state: str) -> str:
     return {"ok":"🟢","info":"🟡","warn":"🔴","unknown":"⚪️"}.get(state, "⚪️")
 
-def _try_html(url, ok_kw, warn_kw, bad_kw, timeout=8):
-    try:
-        r = requests.get(url, timeout=timeout, headers=UA)
-        r.raise_for_status()
-        t = (r.text or "").lower()
-        if any(k in t for k in bad_kw):  return ("warn","html")
-        if any(k in t for k in warn_kw): return ("info","html")
-        if any(k in t for k in ok_kw):   return ("ok","html")
-        return (None,"html")
-    except Exception:
-        return (None,"html")
-
-def _quorum_merge(candidates):
-    states = [s for s,_ in candidates if s is not None]
-    if not states: return "unknown", []
-    if "ok" in states:   return "ok",   [src for s,src in candidates if s=="ok"]
-    if "info" in states: return "info", [src for s,src in candidates if s=="info"]
-    if "warn" in states: return "warn", [src for s,src in candidates if s=="warn"]
-    return "unknown", []
-
 def robust_platform_status_overview(pc_state: str):
-    cache = _read_cache()
-    out = {}
+    """
+    Mehrere harte Signals (DNS/TCP/HTTP) + Quorum + Cache.
+    WARN nur, wenn Statusseite 'Down' meldet UND >=2 harte Checks failen.
+    Sonst UNKNOWN. Dadurch kein falsches Rot mehr.
+    """
+    cache = read_json(PLATFORM_CACHE, {"PC": {}, "PlayStation": {}, "Xbox": {}, "Switch": {}})
 
+    out = {}
+    # PC = Gesamtstatus deiner Heuristik
     out["PC"] = (pc_state, "Overwatch Reachability", "https://overwatch.blizzard.com", None)
     cache["PC"] = {"state": pc_state, "ts": time.time()}
 
-    # PlayStation
-    ps_candidates = [
-        _try_html(
-            "https://status.playstation.com",
-            ok_kw=["all services are up","no issues","up and running"],
-            warn_kw=["limited","degraded","maintenance"],
-            bad_kw=["major outage","outage","down"]
-        )
-    ]
-    ps_state, _ = _quorum_merge(ps_candidates)
-    if ps_state == "unknown":
-        prev = cache.get("PlayStation", {})
-        ps_state = prev.get("state", "unknown")
-        age = _minutes_ago(prev.get("ts"))
-        out["PlayStation"] = (ps_state,"PSN (cached)" if age else "PSN","https://status.playstation.com",age)
-    else:
-        out["PlayStation"] = (ps_state,"PSN","https://status.playstation.com",None)
-        cache["PlayStation"] = {"state": ps_state,"ts": time.time()}
+    for name, cfg in PLATFORM_SIGNALS.items():
+        dns_ok  = any(_dns_ok(h)  for h in cfg["hosts"])
+        tcp_ok_ = any(_tcp_ok(h)  for h in cfg["hosts"])
+        http_ok_ = any(_http_ok(u) for u in cfg["urls"])
+        ok_count = sum([dns_ok, tcp_ok_, http_ok_])
 
-    # Xbox
-    xb_candidates = [
-        _try_html(
-            "https://support.xbox.com/en-US/xbox-live-status",
-            ok_kw=["all services up","no problems","up and running"],
-            warn_kw=["limited","degraded","maintenance"],
-            bad_kw=["outage","down"]
-        )
-    ]
-    xb_state, _ = _quorum_merge(xb_candidates)
-    if xb_state == "unknown":
-        prev = cache.get("Xbox", {})
-        xb_state = prev.get("state","unknown")
-        age = _minutes_ago(prev.get("ts"))
-        out["Xbox"] = (xb_state,"Xbox Live (cached)" if age else "Xbox Live","https://support.xbox.com/en-US/xbox-live-status",age)
-    else:
-        out["Xbox"] = (xb_state,"Xbox Live","https://support.xbox.com/en-US/xbox-live-status",None)
-        cache["Xbox"] = {"state": xb_state,"ts": time.time()}
+        page_hint = _status_page_hint(cfg["status_url"], cfg["ok_kw"], cfg["warn_kw"], cfg["bad_kw"])
 
-    # Nintendo
-    nin_candidates = [
-        _try_html(
-            "https://www.nintendo.co.jp/netinfo/en_US/index.html",
-            ok_kw=["operating normally","no issues"],
-            warn_kw=["maintenance","under maintenance"],
-            bad_kw=["outage","down","experiencing issues"]
-        )
-    ]
-    nin_state, _ = _quorum_merge(nin_candidates)
-    if nin_state == "unknown":
-        prev = cache.get("Switch", {})
-        nin_state = prev.get("state","unknown")
-        age = _minutes_ago(prev.get("ts"))
-        out["Switch"] = (nin_state,"Nintendo (cached)" if age else "Nintendo","https://www.nintendo.co.jp/netinfo/en_US/index.html",age)
-    else:
-        out["Switch"] = (nin_state,"Nintendo","https://www.nintendo.co.jp/netinfo/en_US/index.html",None)
-        cache["Switch"] = {"state": nin_state,"ts": time.time()}
+        if ok_count >= 2:
+            state = "ok"
+        elif page_hint == "warn" and ok_count <= 1:
+            state = "warn"
+        elif page_hint == "info" and ok_count == 0:
+            state = "info"
+        else:
+            state = "unknown"
 
-    _write_cache(cache)
+        age_txt = None
+        if state == "unknown":
+            prev = cache.get(name, {})
+            cached = prev.get("state")
+            if cached:
+                state = cached
+                age_txt = int((time.time() - prev.get("ts", 0))/60) if prev.get("ts") else None
+
+        cache[name] = {"state": state, "ts": time.time()}
+        out[name] = (state, name, cfg["status_url"], age_txt)
+
+    write_json(PLATFORM_CACHE, cache)
     return out
 
 # =========================
@@ -337,11 +342,11 @@ if __name__ == "__main__":
     head_line="   ".join(head_bits)+f" | 24h {u24}% • 7T {u7}%"
     description=f"```\n{head_line}\n```"
 
-    # Plattformen (konservativ, mit Cache/Fallback)
+    # Plattformen (robuste Signals + Quorum + Cache)
     platforms=robust_platform_status_overview(new_state)
     lines=[]
     for name in ("PC","PlayStation","Xbox","Switch"):
-        st,note,link,age=platforms[name]
+        st,_,link,age=platforms[name]
         age_txt=f" (cached {age}m)" if age else ""
         lines.append(f"{name:<11} {platform_icon(st)} {st.upper():<7}{age_txt}")
     platform_block="```\n"+"\n".join(lines)+"\n```"
