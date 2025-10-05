@@ -1,212 +1,253 @@
-import os, json, time, socket, datetime, requests
-from bs4 import BeautifulSoup
+import os, time, json, ssl, socket, datetime, requests
 from pathlib import Path
+from bs4 import BeautifulSoup
 
+# === Konfig per ENV ===
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 THUMB_URL = os.environ.get("THUMB_URL", "").strip()
-STATE_DIR = Path(".bot_state")
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-MID_FILE = STATE_DIR / "ow_message_id.txt"
-HIST_FILE = STATE_DIR / "history.json"
-SPARK_PATH = Path("assets/sparkline.png")
-
-# Quellen (stabil, aber ohne offizielles JSON)
-MAINT_URL = "https://eu.support.blizzard.com/en/article/000358479"
-KNOWN_ISSUES_URL = "https://us.forums.blizzard.com/en/overwatch/c/overwatch-2/known-issues/64"
+ALERT_ROLE_ID = os.environ.get("ALERT_ROLE_ID", "").strip()  # optional: Role-Ping bei Statuswechsel
 
 REGION_HOSTS = {
-    "EU": ["eu.actual.battle.net", "overwatch.blizzard.com"],
-    "NA": ["us.actual.battle.net", "overwatch.blizzard.com"],
+    "EU":   ["eu.actual.battle.net", "overwatch.blizzard.com"],
+    "NA":   ["us.actual.battle.net", "overwatch.blizzard.com"],
     "ASIA": ["kr.actual.battle.net", "overwatch.blizzard.com"],
 }
+MAINT_URL = "https://eu.support.blizzard.com/en/article/000358479"
+KNOWN_ISSUES_URL = "https://us.forums.blizzard.com/en/overwatch/c/overwatch-2/known-issues/64"
+OAUTH_URL = "https://oauth.battle.net/authorize?response_type=code&client_id=dummy&redirect_uri=https://example.com"
 
-def tcp_probe(host: str, port=443, timeout=3.0) -> float | None:
+INFO_MS = float(os.environ.get("INFO_MS", "200"))     # ab hier INFO
+WARN_MS = float(os.environ.get("WARN_MS", "400"))     # ab hier WARN
+CERT_WARN_DAYS = int(os.environ.get("CERT_WARN_DAYS", "14"))
+
+STATE_DIR = Path(".bot_state"); STATE_DIR.mkdir(parents=True, exist_ok=True)
+MID_FILE   = STATE_DIR / "ow_message_id.txt"
+HIST_FILE  = STATE_DIR / "history.json"
+LAST_FILE  = STATE_DIR / "last_payload.json"
+TREND_FILE = STATE_DIR / "last_latency.json"
+SPARK_PATH = Path("assets/sparkline.png")
+
+def _now_utc_str(): return datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')
+
+# --- Messungen ---
+def dns_time_ms(host):
     t0 = time.time()
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return round((time.time() - t0) * 1000.0, 1)
+        socket.getaddrinfo(host, 443)
+        return round((time.time()-t0)*1000.0, 1)
     except OSError:
         return None
 
-def aggregate_latency(hosts):
-    samples = []
-    for h in hosts:
-        ms = tcp_probe(h)
-        if ms is not None:
-            samples.append(ms)
-    if not samples:
-        return {"min": None, "avg": None, "max": None}
-    return {"min": min(samples), "avg": round(sum(samples)/len(samples),1), "max": max(samples)}
+def tcp_handshake_ms(host, port=443, timeout=3.0):
+    t0 = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return round((time.time()-t0)*1000.0, 1)
+    except OSError:
+        return None
 
-def check_maintenance():
+def http_check(url, expect=(200, 301, 302, 303, 307, 308), timeout=6):
+    try:
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        return r.status_code in expect, r.status_code
+    except Exception:
+        return False, None
+
+def cert_days_left(host, port=443, timeout=5):
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        exp = datetime.datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y %Z")
+        return (exp - datetime.datetime.utcnow()).days
+    except Exception:
+        return None
+
+def aggregate_region(region, hosts):
+    ms = [m for h in hosts if (m:=tcp_handshake_ms(h)) is not None]
+    if not ms: return {"min":None,"avg":None,"max":None}
+    return {"min":min(ms),"avg":round(sum(ms)/len(ms),1),"max":max(ms)}
+
+# --- Quellen ---
+def maintenance_status():
     try:
         html = requests.get(MAINT_URL, timeout=20).text
         txt = BeautifulSoup(html, "html.parser").get_text(" ").lower()
-        has_ow = "overwatch" in txt
-        has_maint = any(k in txt for k in ["maintenance", "downtime", "scheduled"])
-        if has_ow and has_maint:
-            return ("Wartungshinweise gefunden.", "warn")
-        return ("Keine expliziten OW-Wartungshinweise gefunden.", "ok")
+        if "overwatch" in txt and any(k in txt for k in ["maintenance","downtime","scheduled"]):
+            return "warn", "Wartungshinweise gefunden."
+        return "ok", "Keine expliziten OW-Wartungshinweise gefunden."
     except Exception as e:
-        return (f"Wartungsseite nicht prüfbar ({e}).", "unknown")
+        return "unknown", f"Wartungsseite nicht prüfbar ({e})."
 
-def check_known_issues():
+def known_issues_status():
     try:
-        r = requests.get(KNOWN_ISSUES_URL, timeout=20)
+        r = requests.get(KNOWN_ISSUES_URL, timeout=12)
         if r.status_code == 200:
-            # Sehr grobe Heuristik: wenn Liste nicht leer -> es gibt offene Themen
-            return ("Es liegen gemeldete „Known Issues“ vor (Details im Link).", "info")
+            return "info", "Bekannte Probleme gelistet (Details im Link)."
         elif r.status_code in (301,302,303,307,308):
-            return ("Hinweise im Forum verfügbar (weitergeleitet).", "info")
+            return "info", "Forum erreichbar (weitergeleitet)."
         else:
-            return ("Forum nicht erreichbar.", "unknown")
+            return "unknown", "Forum nicht erreichbar."
     except Exception:
-        return ("Forum nicht erreichbar.", "unknown")
+        return "unknown", "Forum nicht erreichbar."
 
-def color_for(status: str) -> int:
-    return {
-        "ok": 0x2ECC71,      # grün
-        "warn": 0xF1C40F,    # gelb
-        "info": 0x3498DB,    # blau
-        "unknown": 0x95A5A6  # grau
-    }.get(status, 0x95A5A6)
+# --- Bewertung / State ---
+def severity_from_latency(avg):
+    if avg is None: return "unknown"
+    if avg >= WARN_MS: return "warn"
+    if avg >= INFO_MS: return "info"
+    return "ok"
 
-def build_embed():
-    maint_msg, maint_state = check_maintenance()
-    issues_msg, issues_state = check_known_issues()
+def worst_state(states):
+    order = {"ok":0,"info":1,"warn":2,"unknown":3}
+    return max(states, key=lambda s: order[s])
 
-    fields = []
-    # Regionale Latenz
-    for region, hosts in REGION_HOSTS.items():
-        lat = aggregate_latency(hosts)
-        if lat["avg"] is None:
-            val = "keine Messung möglich"
-        else:
-            val = f'Ø {lat["avg"]} ms (min {lat["min"]} / max {lat["max"]})'
-        fields.append({"name": f"{region} – Erreichbarkeit", "value": val, "inline": True})
+def color_for(state):
+    return {"ok":0x2ECC71,"info":0x3498DB,"warn":0xF1C40F,"unknown":0x95A5A6}[state]
 
-    fields.append({"name": "Wartung", "value": f"[{maint_msg}]({MAINT_URL})", "inline": False})
-    fields.append({"name": "Known Issues", "value": f"[{issues_msg}]({KNOWN_ISSUES_URL})", "inline": False})
+def read_json(p:Path, default):
+    try: return json.loads(p.read_text())
+    except Exception: return default
 
-    desc = "Überblick der erreichbaren Dienste und Hinweise. Dies ist **kein** offizielles Live-„Server down“-Signal."
-    embed = {
-        "title": "Overwatch 2 – Status",
-        "description": desc,
-        "color": color_for(maint_state if maint_state!="ok" else issues_state),
-        "fields": fields,
-        "footer": {"text": f"Automatisch via GitHub Actions • zuletzt geprüft: {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}"},
-        "timestamp": datetime.datetime.utcnow().isoformat()
-    }
-    if THUMB_URL:
-        embed["thumbnail"] = {"url": THUMB_URL}
-    if SPARK_PATH.exists():
-        embed["image"] = {"url": f"https://raw.githubusercontent.com/{os.environ.get('GITHUB_REPOSITORY')}/main/assets/sparkline.png"}
-    return embed
+def write_json(p:Path, obj):
+    p.write_text(json.dumps(obj, ensure_ascii=False, separators=(",",":")))
 
-def diff_changed(new_payload: dict) -> bool:
-    prev = STATE_DIR / "last_payload.json"
-    if prev.exists():
-        try:
-            old = json.loads(prev.read_text())
-            if old == new_payload:
-                return False
-        except Exception:
-            pass
-    prev.write_text(json.dumps(new_payload, ensure_ascii=False, separators=(",",":")))
-    return True
+# --- Verlauf / Sparkline ---
+def append_history(is_ok: bool):
+    hist = read_json(HIST_FILE, [])
+    hist.append({"t": int(time.time()), "ok": 1 if is_ok else 0})
+    hist = hist[-168:]  # 7 Tage bei stündlich
+    write_json(HIST_FILE, hist)
+    return hist
 
-def append_history(ok: bool):
-    # speichere 24h Verlauf (max 24 Einträge)
-    hist = []
-    if HIST_FILE.exists():
-        try:
-            hist = json.loads(HIST_FILE.read_text())
-        except Exception:
-            hist = []
-    hist.append({"t": int(time.time()), "ok": 1 if ok else 0})
-    hist = hist[-24:]
-    HIST_FILE.write_text(json.dumps(hist))
-
-def render_sparkline():
+def render_sparkline(hist):
     try:
         from PIL import Image, ImageDraw
-        hist = []
-        if HIST_FILE.exists():
-            hist = json.loads(HIST_FILE.read_text())
-        if not hist:
-            return
-        w, h = 320, 48
-        img = Image.new("RGB", (w, h), (24, 26, 27))
+        if not hist: return
+        w,h = 420,60
+        img = Image.new("RGB",(w,h),(24,26,27))
         d = ImageDraw.Draw(img)
-        # Rahmen
         d.rectangle([0,0,w-1,h-1], outline=(60,60,60))
-        # Werte (0/1) als Linie
-        n = len(hist)
-        if n == 1: n = 2
-        step = (w-16) / (n-1)
-        pts = []
-        for i, e in enumerate(hist):
-            y = 8 + (1 - e["ok"]) * (h-16)  # ok=1 -> oben, not ok -> unten
+        n = max(2,len(hist)); step = (w-16)/(n-1)
+        pts=[]
+        for i,e in enumerate(hist):
+            y = 10 + (1-e["ok"])*(h-20)
             x = 8 + i*step
             pts.append((x,y))
         d.line(pts, width=2, fill=(120,180,250))
-        # Legende
-        d.text((10, h-14), "24h-Verlauf (OK/Problems)", fill=(180,180,180))
+        ok24 = sum(x["ok"] for x in hist[-24:]) / max(1,len(hist[-24:])) * 100
+        ok168 = sum(x["ok"] for x in hist) / len(hist) * 100
+        d.text((10,h-14), f"Uptime 24h: {ok24:.0f}% • 7T: {ok168:.0f}%", fill=(180,180,180))
+        SPARK_PATH.parent.mkdir(parents=True, exist_ok=True)
         img.save(SPARK_PATH)
     except Exception:
         pass
 
-def read_mid() -> str | None:
-    return MID_FILE.read_text().strip() if MID_FILE.exists() else None
-
-def write_mid(mid: str):
-    MID_FILE.write_text(mid)
-
+# --- Discord I/O ---
 def send_new(payload):
-    r = requests.post(WEBHOOK + "?wait=true", json=payload, timeout=20)
+    r = requests.post(WEBHOOK+"?wait=true", json=payload, timeout=20)
     r.raise_for_status()
     return r.json()["id"]
 
-def edit_existing(mid: str, payload):
-    # PATCH /messages/{message_id}
-    import urllib.parse
-    parts = urllib.parse.urlparse(WEBHOOK).path.split("/")
-    i = parts.index("webhooks")
-    webhook_id, token = parts[i+1], parts[i+2]
-    url = f"https://discord.com/api/webhooks/{webhook_id}/{token}/messages/{mid}"
-    r = requests.patch(url, json=payload, timeout=20)
-    return r
+def edit_existing(mid, payload):
+    from urllib.parse import urlparse
+    parts = urlparse(WEBHOOK).path.strip("/").split("/")
+    i = parts.index("webhooks"); wid, tok = parts[i+1], parts[i+2]
+    url = f"https://discord.com/api/webhooks/{wid}/{tok}/messages/{mid}"
+    return requests.patch(url, json=payload, timeout=20)
 
+def maybe_alert_ping(new_state, old_state):
+    if not ALERT_ROLE_ID: return
+    if old_state == "ok" and new_state in ("warn","unknown"):
+        content = f"<@&{ALERT_ROLE_ID}> Statuswechsel: **{old_state.upper()} → {new_state.upper()}**"
+        try: requests.post(WEBHOOK, json={"content":content, "allowed_mentions":{"parse":["roles"]}}, timeout=10)
+        except Exception: pass
+
+# --- Main ---
 if __name__ == "__main__":
-    # Daten sammeln
-    maint_msg, maint_state = check_maintenance()
-    ok_for_history = maint_state == "ok"
-    append_history(ok_for_history)
-    render_sparkline()
+    # Messungen
+    maint_state, maint_msg = maintenance_status()
+    issues_state, issues_msg = known_issues_status()
+    http_ok, http_code = http_check(OAUTH_URL)
+    cert_days = cert_days_left("overwatch.blizzard.com")
 
-    embed = build_embed()
-    # Buttons/Links
-    components = [{
-        "type": 1,
-        "components": [
-            {"type":2, "style":5, "label":"Maintenance", "url": MAINT_URL},
-            {"type":2, "style":5, "label":"Known Issues", "url": KNOWN_ISSUES_URL}
-        ]
-    }]
-    payload = {"embeds": [embed], "components": components}
+    regions = {}
+    for r, hosts in REGION_HOSTS.items():
+        regions[r] = aggregate_region(r, hosts)
 
-    # Nur editieren, wenn sich das Embed geändert hat
-    if not diff_changed(payload):
-        # Nichts zu tun
-        raise SystemExit(0)
+    # Trendvergleich
+    last_lat = read_json(TREND_FILE, {})
+    trends = {}
+    for r, vals in regions.items():
+        prev = last_lat.get(r, {}).get("avg")
+        cur  = vals["avg"]
+        if prev is None or cur is None: trends[r] = "•"
+        else: trends[r] = "▲" if cur>prev+20 else ("▼" if cur<prev-20 else "→")
+    write_json(TREND_FILE, regions)
 
-    mid = read_mid()
+    # Bewerteter State
+    parts = [maint_state, issues_state]
+    for r, vals in regions.items(): parts.append(severity_from_latency(vals["avg"]))
+    if not http_ok: parts.append("info")  # OAuth nicht erwartungsgemäß
+    if cert_days is not None and cert_days < CERT_WARN_DAYS: parts.append("info")
+    new_state = worst_state(parts)
+
+    # Verlauf & Sparkline
+    hist = append_history(new_state == "ok")
+    render_sparkline(hist)
+
+    # Embed aufbauen
+    fields=[]
+    for r, vals in regions.items():
+        if vals["avg"] is None: v = "keine Messung"
+        else: v = f'Ø {vals["avg"]} ms ({vals["min"]}/{vals["max"]}) {trends[r]}'
+        fields.append({"name": f"{r} – Erreichbarkeit", "value": v, "inline": True})
+    fields.append({"name":"Wartung", "value": f"[{maint_msg}]({MAINT_URL})", "inline": False})
+    fields.append({"name":"Known Issues", "value": f"[{issues_msg}]({KNOWN_ISSUES_URL})", "inline": False})
+    if not http_ok:
+        fields.append({"name":"Login/OAuth", "value": f"Unerwarteter Status {http_code}", "inline": True})
+    if cert_days is not None:
+        fields.append({"name":"TLS-Zertifikat", "value": f"{cert_days} Tage gültig", "inline": True})
+
+    embed = {
+        "title": "Overwatch 2 – Status",
+        "description": "Heuristische Erreichbarkeit & Hinweise (kein offizieller Live-Status).",
+        "color": color_for(new_state),
+        "fields": fields,
+        "footer": {"text": f"Letzte Prüfung: {_now_utc_str()}"},
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    if THUMB_URL: embed["thumbnail"] = {"url": THUMB_URL}
+    if SPARK_PATH.exists():
+        repo = os.environ.get("GITHUB_REPOSITORY")
+        embed["image"] = {"url": f"https://raw.githubusercontent.com/{repo}/main/assets/sparkline.png"}
+
+    components = [{"type":1,"components":[
+        {"type":2,"style":5,"label":"Maintenance","url":MAINT_URL},
+        {"type":2,"style":5,"label":"Known Issues","url":KNOWN_ISSUES_URL},
+        {"type":2,"style":5,"label":"Support","url":"https://support.blizzard.com"}
+    ]}]
+
+    payload = {"embeds":[embed], "components":components}
+
+    # Diff-Only
+    last = read_json(LAST_FILE, None)
+    if last == payload: raise SystemExit(0)
+    write_json(LAST_FILE, payload)
+
+    # Editieren/Erstellen
+    old_state = read_json(STATE_DIR/"state.json", {"state":"ok"})["state"]
+    mid = MID_FILE.read_text().strip() if MID_FILE.exists() else None
     if mid:
         r = edit_existing(mid, payload)
-        if r.status_code == 404:
-            mid = None
-        else:
-            r.raise_for_status()
+        if r.status_code == 404: mid = None
+        else: r.raise_for_status()
     if not mid:
         new_id = send_new(payload)
-        write_mid(str(new_id))
+        MID_FILE.write_text(str(new_id))
+
+    # Optionaler Ping bei Statuswechsel
+    if old_state != new_state:
+        maybe_alert_ping(new_state, old_state)
+        write_json(STATE_DIR/"state.json", {"state":new_state})
