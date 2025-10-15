@@ -1,1 +1,23 @@
-{"EU":{"min":86.0,"avg":86.0,"max":86.0},"NA":{"min":77.0,"avg":77.0,"max":77.0},"ASIA":{"min":48.1,"avg":48.1,"max":48.1}}
+{
+  "EU": {
+    "min": null,
+    "avg": null,
+    "max": null,
+    "reachable": 0,
+    "total": 2
+  },
+  "NA": {
+    "min": null,
+    "avg": null,
+    "max": null,
+    "reachable": 0,
+    "total": 2
+  },
+  "ASIA": {
+    "min": null,
+    "avg": null,
+    "max": null,
+    "reachable": 0,
+    "total": 2
+  }
+}
