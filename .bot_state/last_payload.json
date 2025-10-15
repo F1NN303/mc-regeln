@@ -2,7 +2,7 @@
   "embeds": [
     {
       "title": "🔴 Overwatch 2 Server Status",
-      "description": "🔴 **EU**: Nicht erreichbar\n🔴 **NA**: Nicht erreichbar\n🔴 **ASIA**: Nicht erreichbar\n\n📊 **Uptime**: 24h: 88% • 7d: 93%",
+      "description": "🔴 **EU**: Nicht erreichbar\n🔴 **NA**: Nicht erreichbar\n🔴 **ASIA**: Nicht erreichbar\n\n📊 **Uptime**: 24h: 83% • 7d: 92%",
       "color": 15158332,
       "fields": [
         {
@@ -27,14 +27,14 @@
         }
       ],
       "footer": {
-        "text": "Letzte Prüfung: 2025-10-15 11:58 UTC • Status: ERROR"
+        "text": "Letzte Prüfung: 2025-10-15 12:04 UTC • Status: ERROR"
       },
-      "timestamp": "2025-10-15T11:58:44.717134",
+      "timestamp": "2025-10-15T12:04:21.582803",
       "thumbnail": {
         "url": "https://raw.githubusercontent.com/F1NN303/mc-regeln/main/assets/ow2.png"
       },
       "image": {
-        "url": "https://raw.githubusercontent.com/F1NN303/mc-regeln/main/assets/sparkline.png?t=1760529524"
+        "url": "https://raw.githubusercontent.com/F1NN303/mc-regeln/main/assets/sparkline.png?t=1760529861"
       }
     }
   ],
