@@ -100,6 +100,7 @@ def worst_state(states):
 # =========================
 MAINT_URL = "https://eu.support.blizzard.com/en/article/000358479"
 KNOWN_ISSUES_JSON = "https://us.forums.blizzard.com/en/overwatch/c/overwatch-2/known-issues/64.json"
+NEWS_INDEX_URL = "https://overwatch.blizzard.com/en-us/news"
 MAINT_DATE_RE = re.compile(r"(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*,?\s*)?(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[, ]+\s*(\d{4})", re.I)
 
 def fetch_known_issues_summary():
@@ -142,6 +143,69 @@ def fetch_maintenance_hint():
         return "ok", "Keine expliziten OW-Wartungshinweise."
     except Exception:
         return "unknown", "Wartungsseite nicht prüfbar."
+
+def _absolute_overwatch_url(url: str) -> str:
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    if url.startswith("/"):
+        return f"https://overwatch.blizzard.com{url}"
+    return f"{NEWS_INDEX_URL.rstrip('/')}/{url.lstrip('/')}"
+
+def fetch_latest_news():
+    try:
+        r = requests.get(NEWS_INDEX_URL, timeout=20, headers=UA)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        for script in soup.find_all("script", type="application/ld+json"):
+            raw = (script.string or "").strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+
+            candidates = []
+            if isinstance(data, dict):
+                if data.get("@type") == "ItemList":
+                    candidates = data.get("itemListElement", [])
+                elif data.get("@type") == "NewsArticle":
+                    candidates = [data]
+            elif isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict) and entry.get("@type") == "ItemList":
+                        candidates = entry.get("itemListElement", [])
+                        break
+
+            for item in candidates:
+                target = item.get("item") if isinstance(item, dict) else None
+                if isinstance(target, dict):
+                    title = target.get("name") or target.get("headline")
+                    url = target.get("url")
+                elif isinstance(item, dict) and item.get("@type") == "NewsArticle":
+                    title = item.get("headline") or item.get("name")
+                    url = item.get("url")
+                else:
+                    continue
+                if title and url:
+                    return title.strip(), _absolute_overwatch_url(url)
+
+        for link in soup.select("a[href]"):
+            href = link.get("href", "")
+            if "/news/" not in href:
+                continue
+            if href.rstrip("/").endswith("/news"):
+                continue
+            title = link.get_text(strip=True)
+            if not title:
+                img = link.find("img")
+                title = img.get("alt") if img else ""
+            if title:
+                return title, _absolute_overwatch_url(href)
+        return None, NEWS_INDEX_URL
+    except Exception:
+        return None, NEWS_INDEX_URL
 
 # =========================
 # Plattform-Status (robuste Signals + Quorum + Cache)
@@ -344,6 +408,7 @@ if __name__ == "__main__":
 
     maint_state,maint_msg=fetch_maintenance_hint()
     ki_count,ki_title,ki_url=fetch_known_issues_summary()
+    news_title, news_url = fetch_latest_news()
 
     parts=[maint_state]+[severity_from_latency(regions[r]["avg"]) for r in REGIONS]
     if ki_count and ki_count>0: parts.append("info")
@@ -422,6 +487,11 @@ if __name__ == "__main__":
     else:
         ki_lines.append(f"[Forum öffnen]({ki_url})")
     fields.append({"name":"Known Issues","value":"\n".join(ki_lines),"inline":False})
+    if news_title:
+        news_value = f"[„{news_title}“]({news_url})"
+    else:
+        news_value = f"[Overwatch-News öffnen]({news_url})"
+    fields.append({"name":"Neueste Updates","value":news_value,"inline":False})
     fields.append({"name":"Letzte Änderungen","value":last_changelog_lines(2),"inline":False})
 
     embed={
