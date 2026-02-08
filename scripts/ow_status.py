@@ -378,8 +378,10 @@ if __name__ == "__main__":
     fields=[]
     fields.append({
         "name":"Gesamtstatus",
-        "value":f"{state_icon(new_state)} **{new_state.upper()}**\n"
-                 f"Uptime 24h: **{u24}%** • 7T: **{u7}%**",
+        "value":(
+            f"{state_icon(new_state)} **{new_state.upper()}**\n"
+            f"Uptime 24h: **{u24}%** • 7T: **{u7}%**"
+        ),
         "inline":False,
     })
     fields.append({"name":"Plattformen","value":platform_block,"inline":False})
@@ -393,13 +395,33 @@ if __name__ == "__main__":
                 f"Jitter: {v['jitter']} ms • Loss: {v['loss_pct']}%"
             )
         fields.append({"name":f"{r} – Erreichbarkeit","value":val,"inline":True})
-    fields.append({"name":"Wartung","value":f"[{maint_msg}]({MAINT_URL})","inline":False})
+    maint_label = (
+        "Keine Hinweise" if maint_state == "ok"
+        else "Wartung gemeldet" if maint_state == "warn"
+        else "Hinweis gefunden" if maint_state == "info"
+        else "Nicht prüfbar"
+    )
+    fields.append({
+        "name":"Wartung",
+        "value":f"{state_icon(maint_state)} **{maint_label}**\n[{maint_msg}]({MAINT_URL})",
+        "inline":False,
+    })
+
     if ki_count is None:
-        ki_val=f"[Keine Daten]({ki_url})"
+        ki_state = "unknown"
+        ki_label = "Keine Daten verfügbar"
+    elif ki_count > 0:
+        ki_state = "info"
+        ki_label = f"{ki_count} neue/aktualisierte Beiträge in 24h"
     else:
-        label=f"{ki_count} neue/aktualisierte Beiträge in 24h" if ki_count>0 else "Keine neuen Beiträge in 24h"
-        ki_val=f"[{label}]({ki_url})"+(f"\nZuletzt: „{ki_title}“" if ki_title else "")
-    fields.append({"name":"Known Issues","value":ki_val,"inline":False})
+        ki_state = "ok"
+        ki_label = "Keine neuen Beiträge in 24h"
+    ki_lines = [f"{state_icon(ki_state)} **{ki_label}**"]
+    if ki_title:
+        ki_lines.append(f"Letzter Eintrag: [„{ki_title}“]({ki_url})")
+    else:
+        ki_lines.append(f"[Forum öffnen]({ki_url})")
+    fields.append({"name":"Known Issues","value":"\n".join(ki_lines),"inline":False})
     fields.append({"name":"Letzte Änderungen","value":last_changelog_lines(2),"inline":False})
 
     embed={
