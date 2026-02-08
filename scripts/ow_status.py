@@ -1,5 +1,5 @@
 # scripts/ow_status.py
-import os, time, json, socket, datetime, re
+import os, time, json, socket, datetime, re, statistics
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -32,6 +32,7 @@ COLORS = {"ok": 0x2ECC71, "info": 0x3498DB, "warn": 0xF1C40F, "unknown": 0x95A5A
 ORDER  = {"ok":0, "info":1, "warn":2, "unknown":3}
 INFO_MS = float(os.environ.get("INFO_MS", "200"))
 WARN_MS = float(os.environ.get("WARN_MS", "400"))
+SAMPLES = int(os.environ.get("SAMPLES", "2"))
 
 # =========================
 # Hilfsfunktionen
@@ -65,9 +66,25 @@ def tcp_ms(host, port=443, timeout=3.0):
         return None
 
 def aggregate_region(hosts):
-    vals = [m for h in hosts if (m := tcp_ms(h)) is not None]
-    if not vals: return {"min":None,"avg":None,"max":None}
-    return {"min":min(vals), "avg":round(sum(vals)/len(vals),1), "max":max(vals)}
+    vals = []
+    total = 0
+    for h in hosts:
+        for _ in range(max(SAMPLES, 1)):
+            total += 1
+            if (m := tcp_ms(h)) is not None:
+                vals.append(m)
+    if not vals:
+        loss_pct = 100
+        return {"min":None, "avg":None, "max":None, "jitter":None, "loss_pct":loss_pct}
+    loss_pct = round((total - len(vals)) / total * 100) if total else 0
+    jitter = round(statistics.pstdev(vals), 1) if len(vals) > 1 else 0.0
+    return {
+        "min": min(vals),
+        "avg": round(sum(vals) / len(vals), 1),
+        "max": max(vals),
+        "jitter": jitter,
+        "loss_pct": loss_pct,
+    }
 
 def severity_from_latency(avg):
     if avg is None:        return "unknown"
@@ -190,6 +207,9 @@ def _status_page_hint(url, ok_kw, warn_kw, bad_kw):
 
 def platform_icon(state: str) -> str:
     return {"ok":"🟢","info":"🟡","warn":"🔴","unknown":"⚪️"}.get(state, "⚪️")
+
+def state_icon(state: str) -> str:
+    return {"ok":"🟢","info":"🟡","warn":"🟠","unknown":"⚪️"}.get(state, "⚪️")
 
 def robust_platform_status_overview(pc_state: str):
     """
@@ -338,7 +358,10 @@ if __name__ == "__main__":
         save_changelog_change(old_state,new_state)
         write_json(STATE_FILE,{"state":new_state})
 
-    head_bits=[f"{r} Ø{regions[r]['avg']:.0f}ms" if regions[r]['avg'] else f"{r} n/a" for r in REGIONS]
+    head_bits=[
+        f"{r} Ø{regions[r]['avg']:.0f}ms" if regions[r]["avg"] else f"{r} n/a"
+        for r in REGIONS
+    ]
     head_line="   ".join(head_bits)+f" | 24h {u24}% • 7T {u7}%"
     description=f"```\n{head_line}\n```"
 
@@ -353,10 +376,22 @@ if __name__ == "__main__":
 
     # Embed-Felder
     fields=[]
+    fields.append({
+        "name":"Gesamtstatus",
+        "value":f"{state_icon(new_state)} **{new_state.upper()}**\n"
+                 f"Uptime 24h: **{u24}%** • 7T: **{u7}%**",
+        "inline":False,
+    })
     fields.append({"name":"Plattformen","value":platform_block,"inline":False})
     for r in REGIONS:
         v=regions[r]
-        val="keine Messung" if v["avg"] is None else f"Ø {v['avg']} ms ({v['min']}/{v['max']}) {trends[r]}"
+        if v["avg"] is None:
+            val="keine Messung"
+        else:
+            val=(
+                f"Ø {v['avg']} ms ({v['min']}/{v['max']}) {trends[r]}\n"
+                f"Jitter: {v['jitter']} ms • Loss: {v['loss_pct']}%"
+            )
         fields.append({"name":f"{r} – Erreichbarkeit","value":val,"inline":True})
     fields.append({"name":"Wartung","value":f"[{maint_msg}]({MAINT_URL})","inline":False})
     if ki_count is None:
