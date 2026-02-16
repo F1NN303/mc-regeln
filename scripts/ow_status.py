@@ -21,6 +21,7 @@ REPO       = os.environ.get("GITHUB_REPOSITORY", "")
 
 WEBHOOK   = os.environ["DISCORD_WEBHOOK_URL"].strip()
 THUMB_URL = os.environ.get("THUMB_URL", "").strip()
+STATUS_PAGE_URL = os.environ.get("STATUS_PAGE_URL", "https://f1nn303.github.io/Owstatusupdater/").strip()
 REGIONS   = [r.strip() for r in os.environ.get("REGIONS", "EU,NA,ASIA").split(",") if r.strip()]
 
 UA = {"User-Agent": "OW2-Status/1.4 (+github-actions)"}
@@ -496,6 +497,7 @@ if __name__ == "__main__":
 
     embed={
         "title":"Overwatch 2 – Status",
+        "url": STATUS_PAGE_URL,
         "description":description,
         "color":COLORS.get(new_state,COLORS["unknown"]),
         "fields":fields,
@@ -510,13 +512,14 @@ if __name__ == "__main__":
     components=[{
         "type":1,
         "components":[
+            {"type":2,"style":5,"label":"Statusseite","url":STATUS_PAGE_URL},
             {"type":2,"style":5,"label":"Maintenance","url":MAINT_URL},
             {"type":2,"style":5,"label":"Known Issues","url":ki_url},
             {"type":2,"style":5,"label":"Support","url":"https://support.blizzard.com"}
         ]
     }]
 
-    payload={"embeds":[embed],"components":components}
+    payload={"content":STATUS_PAGE_URL,"embeds":[embed],"components":components}
 
     # Diff-only: nur editieren, wenn sich etwas geändert hat
     last = read_json(LAST_FILE, None)
