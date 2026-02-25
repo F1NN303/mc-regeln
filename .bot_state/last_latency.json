@@ -1,1 +1,1 @@
-{"EU":{"min":48.9,"avg":60.3,"max":71.8,"jitter":11.4,"loss_pct":50},"NA":{"min":18.5,"avg":32.6,"max":46.7,"jitter":14.1,"loss_pct":50},"ASIA":{"min":18.1,"avg":21.6,"max":25.2,"jitter":3.5,"loss_pct":50}}
+{"EU":{"min":87.4,"avg":95.3,"max":103.2,"jitter":7.9,"loss_pct":50},"NA":{"min":67.0,"avg":72.5,"max":78.1,"jitter":5.5,"loss_pct":50},"ASIA":{"min":67.6,"avg":77.9,"max":88.3,"jitter":10.4,"loss_pct":50}}
